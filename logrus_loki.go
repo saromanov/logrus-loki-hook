@@ -35,7 +35,7 @@ func NewHook() (*Hook, error) {
 
 // Fire implements interface for logrus
 func (hook *Hook) Fire(entry *logrus.Entry) error {
-	hook.client.Debugf(entry.String())
+	hook.client.Debugf(entry.Level.String())
 	return nil
 }
 
