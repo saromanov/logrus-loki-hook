@@ -29,11 +29,13 @@ func NewHook() (*Hook, error) {
 	}
 }
 
+// Fire implements interface for logrus
 func (hook *Hook) Fire(entry *logrus.Entry) error {
-	
+	hook.client.Debugf(entry.String())
 	return nil
 }
 
+// Levels retruns supported levels
 func (hook *Hook) Levels() []logrus.Level {
 	return supportedLevels
 }
