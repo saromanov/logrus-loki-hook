@@ -16,8 +16,6 @@ type Config struct {
 	Labels             string
 	BatchWait          time.Duration
 	BatchEntriesNumber int
-	SendLevel          promtail.LogLevel
-	PrintLevel         promtail.LogLevel
 }
 
 func (c *Config) setDefault() {
