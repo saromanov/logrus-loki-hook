@@ -35,7 +35,18 @@ func NewHook() (*Hook, error) {
 
 // Fire implements interface for logrus
 func (hook *Hook) Fire(entry *logrus.Entry) error {
-	hook.client.Debugf(entry.Level.String())
+	switch entry.Level.String() {
+	case "debug":
+		hook.client.Debugf(entry.Level.String())
+	case "info":
+		hook.client.Infof(entry.Level.String())
+	case "warning":
+		hook.client.Warnf(entry.Level.String())
+	case "error":
+		hook.client.Errorf(entry.Level.String())
+	default:
+		return fmt.Errorf("unknown log level")
+	}
 	return nil
 }
 
