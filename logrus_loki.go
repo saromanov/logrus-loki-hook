@@ -10,17 +10,47 @@ import (
 
 var supportedLevels = []logrus.Level{logrus.DebugLevel, logrus.InfoLevel, logrus.WarnLevel, logrus.ErrorLevel}
 
+// Config defines configuration for hook for Loki
+type Config struct {
+	URL                string
+	Labels             string
+	BatchWait          time.Duration
+	BatchEntriesNumber int
+	SendLevel          promtail.LogLevel
+	PrintLevel         promtail.LogLevel
+}
+
+func (c *Config) setDefault() {
+	if c.URL == "" {
+		c.URL = "http://localhost:3100/api/prom/push"
+	}
+	if c.Labels == "" {
+		c.Labels = "{source=\"" + "test" + "\",job=\"" + "job" + "\"}"
+	}
+	if c.BatchWait == time.Second {
+		c.BatchWait = 5 * time.Second
+	}
+	if c.BatchEntriesNumber == 0 {
+		c.BatchEntriesNumber = 10000
+	}
+
+}
+
 type Hook struct {
 	client promtail.Client
 }
 
 // NewHook creates a new hook for Loki
-func NewHook() (*Hook, error) {
+func NewHook(c *Config) (*Hook, error) {
+	if c == nil {
+		c = &Config{}
+	}
+	c.setDefault()
 	conf := promtail.ClientConfig{
-		PushURL:            "http://localhost:3100/api/prom/push",
-		Labels:             "{source=\"" + "test" + "\",job=\"" + "job" + "\"}",
-		BatchWait:          5 * time.Second,
-		BatchEntriesNumber: 10000,
+		PushURL:            c.URL,
+		Labels:             c.Labels,
+		BatchWait:          c.BatchWait,
+		BatchEntriesNumber: c.BatchEntriesNumber,
 		SendLevel:          promtail.INFO,
 		PrintLevel:         promtail.ERROR,
 	}
