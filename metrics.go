@@ -59,6 +59,10 @@ func (c *Client) renderMetrics(w io.Writer) {
 	add("# TYPE loki_client_rate_limited_total counter")
 	add("loki_client_rate_limited_total %d", c.rateLimited.Load())
 
+	add("# HELP loki_client_spilled_total Entries written to the durable disk buffer.")
+	add("# TYPE loki_client_spilled_total counter")
+	add("loki_client_spilled_total %d", c.spilled.Load())
+
 	add("# HELP loki_client_queue_depth Entries currently waiting in the queue.")
 	add("# TYPE loki_client_queue_depth gauge")
 	add("loki_client_queue_depth %d", len(c.queue))

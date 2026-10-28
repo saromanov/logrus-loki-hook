@@ -35,6 +35,7 @@ const (
 	dropPush
 	dropRateLimited
 	dropRejected
+	dropCorrupt
 	dropReasonCount
 )
 
@@ -44,6 +45,7 @@ var dropReasonNames = [dropReasonCount]string{
 	"push_error",
 	"rate_limited",
 	"rejected",
+	"corrupt",
 }
 
 type pushStream struct {
@@ -77,6 +79,8 @@ type Client struct {
 	pushCount    atomic.Int64
 	metricsSrv   *http.Server
 	metricsAddr  string
+	spilled      atomic.Int64
+	buffer       *diskBuffer
 	errLogger    *log.Logger
 
 	// adaptive is the current effective batch size. It shrinks on repeated
@@ -104,6 +108,18 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 	if cfg.MaxLogsPerSecond > 0 {
 		c.limiter = newTokenBucket(cfg.MaxLogsPerSecond)
+	}
+	if cfg.BufferPath != "" {
+		buf, err := newDiskBuffer(cfg.BufferPath, cfg.BufferMaxSize, cfg.BufferMaxSegments, c.errLogger)
+		if err != nil {
+			return nil, err
+		}
+		c.buffer = buf
+		// Drain the on-disk backlog before new entries are accepted. A
+		// failure keeps the undelivered tail on disk for the next start.
+		if err := buf.drain(c); err != nil {
+			c.errLogger.Printf("loki: disk buffer drain incomplete: %v (retries on next start)", err)
+		}
 	}
 	if cfg.MetricsAddr != "" {
 		srv, addr, err := startMetricsServer(cfg.MetricsAddr, c)
@@ -147,6 +163,9 @@ func (c *Client) Send(ts int64, line string, labels map[string]string) error {
 		case c.queue <- entry:
 			return nil
 		case <-timer.C:
+			if c.spill(entry) {
+				return nil
+			}
 			c.drop(1, dropQueueFull)
 			return ErrQueueFull
 		}
@@ -164,6 +183,9 @@ func (c *Client) Send(ts int64, line string, labels map[string]string) error {
 			case c.queue <- entry:
 				return nil
 			default:
+				if c.spill(entry) {
+					return nil
+				}
 				c.drop(1, dropQueueFull)
 				return ErrQueueFull
 			}
@@ -173,10 +195,27 @@ func (c *Client) Send(ts int64, line string, labels map[string]string) error {
 		case c.queue <- entry:
 			return nil
 		default:
+			if c.spill(entry) {
+				return nil
+			}
 			c.drop(1, dropQueueFull)
 			return ErrQueueFull
 		}
 	}
+}
+
+// spill stores the entry in the disk buffer when one is configured and
+// reports whether it succeeded.
+func (c *Client) spill(e logEntry) bool {
+	if c.buffer == nil {
+		return false
+	}
+	if err := c.buffer.spill(e); err != nil {
+		c.errLogger.Printf("loki: disk buffer spill failed: %v", err)
+		return false
+	}
+	c.spilled.Add(1)
+	return true
 }
 
 // truncateMarker is appended to lines shortened by MaxLineSize.
@@ -214,12 +253,16 @@ func (c *Client) Flush() error {
 }
 
 // Close stops the client, drains the queue and flushes every pending entry.
+// The disk buffer backlog is intentionally kept for the next startup.
 func (c *Client) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 	close(c.done)
 	c.wg.Wait()
+	if c.buffer != nil {
+		_ = c.buffer.close()
+	}
 	if c.metricsSrv != nil {
 		_ = c.metricsSrv.Close()
 	}
@@ -259,13 +302,14 @@ func (c *Client) sampleKeep() bool {
 }
 
 // Counters reports delivery counters, including entries skipped on purpose
-// by sampling or rate limiting. See Stats for the simpler sent/dropped view.
+// by sampling or rate limiting and entries kept on disk by the buffer.
 func (c *Client) Counters() Counters {
 	return Counters{
 		Sent:        c.sent.Load(),
 		Dropped:     c.dropped.Load(),
 		Sampled:     c.sampled.Load(),
 		RateLimited: c.rateLimited.Load(),
+		Spilled:     c.spilled.Load(),
 	}
 }
 
@@ -338,21 +382,45 @@ func (c *Client) drainQueue(batch *[]logEntry) {
 	}
 }
 
-// push delivers a batch, dropping it on unrecoverable failure. Oversized or
-// rejected batches are split in half until the failing entries are isolated.
+// push delivers a batch, dropping the entries when delivery fails. The
+// caller (the batcher goroutine) tunes the adaptive batch size from the
+// returned error.
 func (c *Client) push(entries []logEntry) error {
-	return c.pushBatch(entries)
+	err := c.deliver(entries)
+	if err == nil {
+		return nil
+	}
+	reason := dropPush
+	var se *httpStatusError
+	if errors.As(err, &se) {
+		switch {
+		case isRateLimitedCode(se.code):
+			reason = dropRateLimited
+		case se.code == http.StatusBadRequest || se.code == http.StatusRequestEntityTooLarge:
+			reason = dropRejected
+		}
+	}
+	if errors.Is(err, errEncode) {
+		reason = dropEncode
+	}
+	c.drop(len(entries), reason)
+	c.errLogger.Printf("failed to push %d entries to Loki: %v", len(entries), err)
+	return err
 }
 
-func (c *Client) pushBatch(entries []logEntry) error {
+// errEncode marks permanent payload encoding failures.
+var errEncode = errors.New("loki: encode entries")
+
+// deliver encodes and sends entries, splitting batches rejected by Loki in
+// half until the offender is isolated. Successful entries are counted as
+// sent; on failure the entries are left to the caller (drop or disk spill).
+func (c *Client) deliver(entries []logEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
 	payload, err := c.encode(entries)
 	if err != nil {
-		c.drop(len(entries), dropEncode)
-		c.errLogger.Printf("failed to encode %d entries: %v", len(entries), err)
-		return err
+		return fmt.Errorf("%w: %w", errEncode, err)
 	}
 	start := time.Now()
 	if err := c.send(payload); err != nil {
@@ -360,25 +428,17 @@ func (c *Client) pushBatch(entries []logEntry) error {
 		c.pushDuration.Add(int64(time.Since(start)))
 		c.pushErrors.Add(1)
 		var se *httpStatusError
-		if errors.As(err, &se) && se.code == http.StatusBadRequest && len(entries) > 1 {
+		if errors.As(err, &se) && (se.code == http.StatusBadRequest || se.code == http.StatusRequestEntityTooLarge) && len(entries) > 1 {
 			mid := len(entries) / 2
-			err1 := c.pushBatch(entries[:mid])
-			err2 := c.pushBatch(entries[mid:])
+			// Both halves are attempted even when the first one fails, so
+			// the second half keeps its chance to be delivered.
+			err1 := c.deliver(entries[:mid])
+			err2 := c.deliver(entries[mid:])
 			if err1 != nil {
 				return err1
 			}
 			return err2
 		}
-		reason := dropPush
-		if se != nil {
-			if isRateLimitedCode(se.code) {
-				reason = dropRateLimited
-			} else if se.code == http.StatusBadRequest || se.code == http.StatusRequestEntityTooLarge {
-				reason = dropRejected
-			}
-		}
-		c.drop(len(entries), reason)
-		c.errLogger.Printf("failed to push %d entries to Loki: %v", len(entries), err)
 		return err
 	}
 	c.pushCount.Add(1)

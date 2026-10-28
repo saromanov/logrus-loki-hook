@@ -12,6 +12,7 @@ v2 is a complete rewrite: it talks to the modern Loki API (`/loki/api/v1/push`, 
 ## Features
 
 - **No lost logs** — background batching with `Flush()`/`Close()`: everything queued is delivered on shutdown, including `panic`/`fatal` entries
+- **Survives crashes** — optional durable disk buffer (`BufferPath`): entries that do not fit into the queue are appended to disk instead of being dropped and are drained into Loki on the next startup, `kill -9`-safe
 - **Never blocks your app** — async buffered queue with configurable overflow policies: `DropNewest`, `DropOldest`, `Block` (with timeout)
 - **Flood protection** — `SampleRate` keeps every Nth low-severity entry while warn and above always pass, and `MaxLogsPerSecond` caps the delivery rate with a token bucket; both are visible in `Counters()`, so loss is never silent
 - **Retries with backoff** — transient failures (network errors, `429`, `421`, `5xx`) are retried with exponential backoff; a `Retry-After` header is honored instead of the fixed backoff; permanent `4xx` fail fast
@@ -115,6 +116,9 @@ hook, err := hook.NewHook(hook.Config{
 | `SampleRate` | off | 1-in-N sampling for Info/Debug entries; warn and above always pass |
 | `MaxLogsPerSecond` | off | Token-bucket cap on the delivery rate (burst = rate) |
 | `MetricsAddr` | off | Serve a Prometheus `/metrics` endpoint on this address |
+| `BufferPath` | off | Durable disk buffer file; overflow entries spill there instead of being dropped |
+| `BufferMaxSize` | `64MiB` | Size cap per buffer segment before rotation |
+| `BufferMaxSegments` | `4` | Rotated segments kept next to the active one |
 
 ## Metrics
 
@@ -127,7 +131,7 @@ hook, err := hook.NewHook(hook.Config{
 })
 ```
 
-Exposed metrics: `loki_client_sent_total`, `loki_client_dropped_total{reason}` (`queue_full`, `encode_error`, `push_error`, `rate_limited`, `rejected`), `loki_client_sampled_total`, `loki_client_rate_limited_total`, `loki_client_queue_depth`, `loki_client_push_errors_total` and `loki_client_push_duration_seconds` (summary). Point Prometheus at `http://<addr>/metrics` to see exactly when and why logs were dropped.
+Exposed metrics: `loki_client_sent_total`, `loki_client_dropped_total{reason}` (`queue_full`, `encode_error`, `push_error`, `rate_limited`, `rejected`, `corrupt`), `loki_client_sampled_total`, `loki_client_rate_limited_total`, `loki_client_spilled_total`, `loki_client_queue_depth`, `loki_client_push_errors_total` and `loki_client_push_duration_seconds` (summary). Point Prometheus at `http://<addr>/metrics` to see exactly when and why logs were dropped.
 
 ## Migration from v1
 
