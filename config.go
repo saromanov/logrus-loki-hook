@@ -1,9 +1,3 @@
-// Package hook provides a logrus hook and an slog handler that ship logs to
-// Grafana Loki over the native HTTP push API (/loki/api/v1/push).
-//
-// The client batches entries in a background goroutine, applies configurable
-// overflow policies, retries transient failures with exponential backoff and
-// flushes everything on Close, so no logs are lost on shutdown.
 package hook
 
 import (
