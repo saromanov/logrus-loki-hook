@@ -1,11 +1,17 @@
 package hook
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestClientPushesEntriesGroupedByStream(t *testing.T) {
@@ -324,5 +330,302 @@ func TestClientCloseFlushesRemainingEntries(t *testing.T) {
 	sent, _ := c.Stats()
 	if sent != 5 {
 		t.Fatalf("want sent=5, got %d", sent)
+	}
+}
+
+func TestClientTruncatesOversizedLines(t *testing.T) {
+	s := newLokiServer(t, 204)
+	cfg := testConfig(s.srv.URL)
+	cfg.MaxLineSize = 100
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if err := c.Send(time.Now().UnixNano(), strings.Repeat("a", 5000), nil); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if err := c.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	line := s.decodedPayload(t).Streams[0].Values[0][1]
+	if len(line) != 100 {
+		t.Fatalf("want truncated line of 100 bytes, got %d", len(line))
+	}
+	if !strings.HasSuffix(line, truncateMarker) {
+		t.Fatalf("line is not marked as truncated: %q", line)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestClientTruncationKeepsValidUTF8(t *testing.T) {
+	s := newLokiServer(t, 204)
+	cfg := testConfig(s.srv.URL)
+	cfg.MaxLineSize = 40
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	long := strings.Repeat("ß", 25) // 50 bytes, 2-byte runes
+	if err := c.Send(time.Now().UnixNano(), long, nil); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if err := c.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	line := s.decodedPayload(t).Streams[0].Values[0][1]
+	if len(line) != 40 {
+		t.Fatalf("want 40 bytes, got %d", len(line))
+	}
+	if !utf8.ValidString(line) {
+		t.Fatalf("truncated line broke UTF-8: %q", line)
+	}
+	if !strings.HasSuffix(line, truncateMarker) {
+		t.Fatalf("line is not marked as truncated: %q", line)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestClientTruncationDisabled(t *testing.T) {
+	s := newLokiServer(t, 204)
+	cfg := testConfig(s.srv.URL)
+	cfg.MaxLineSize = -1
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	long := strings.Repeat("a", 600000)
+	if err := c.Send(time.Now().UnixNano(), long, nil); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if err := c.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	line := s.decodedPayload(t).Streams[0].Values[0][1]
+	if len(line) != 600000 {
+		t.Fatalf("want untouched line of 600000 bytes, got %d", len(line))
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestClientSplitsBatchRejectedByLoki(t *testing.T) {
+	s := newLokiServer(t, 204)
+	s.badLeft = 1 // first push (whole batch) is rejected, halves succeed
+	cfg := testConfig(s.srv.URL)
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := c.Send(time.Now().UnixNano(), fmt.Sprintf("line-%d", i), nil); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+	}
+	if err := c.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if s.requestCount() != 3 {
+		t.Fatalf("want 3 requests (batch + 2 halves), got %d", s.requestCount())
+	}
+	if st := s.statusAt(0); st != http.StatusBadRequest {
+		t.Fatalf("want first request rejected, got %d", st)
+	}
+	for i := 1; i < 3; i++ {
+		if s.totalValuesAt(t, i) != 2 {
+			t.Fatalf("request %d: want 2 values per half, got %d", i, s.totalValuesAt(t, i))
+		}
+	}
+	sent, dropped := c.Stats()
+	if sent != 4 || dropped != 0 {
+		t.Fatalf("want sent=4 dropped=0, got sent=%d dropped=%d", sent, dropped)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestClientDropsRejectedSingleEntry(t *testing.T) {
+	s := newLokiServer(t, 204)
+	s.badLeft = 3 // batch of 2 and both halves fail
+	cfg := testConfig(s.srv.URL)
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if err := c.Send(time.Now().UnixNano(), "a", nil); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if err := c.Send(time.Now().UnixNano(), "b", nil); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if err := c.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if s.requestCount() != 3 {
+		t.Fatalf("want 3 requests, got %d", s.requestCount())
+	}
+	sent, dropped := c.Stats()
+	if sent != 0 || dropped != 2 {
+		t.Fatalf("want sent=0 dropped=2, got sent=%d dropped=%d", sent, dropped)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+// dumpRequests logs every captured request for debugging failed assertions.
+func (s *lokiServer) dumpRequests(t *testing.T) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, r := range s.reqs {
+		vals := 0
+		lines := []string{}
+		if zr, err := gzip.NewReader(bytes.NewReader(r.body)); err == nil {
+			if data, err := io.ReadAll(zr); err == nil {
+				var p pushPayload
+				if json.Unmarshal(data, &p) == nil {
+					for _, st := range p.Streams {
+						vals += len(st.Values)
+						for _, v := range st.Values {
+							lines = append(lines, v[1])
+						}
+					}
+				}
+			}
+		}
+		t.Logf("request %d: status=%d values=%d bytes=%d lines=%v", i, r.status, vals, len(r.body), lines)
+	}
+}
+
+func TestClientHonorsRetryAfter(t *testing.T) {
+	s := newLokiServer(t, 204)
+	s.rateLimitLeft = 1
+	s.retryAfterValue = "1"
+	cfg := testConfig(s.srv.URL)
+	cfg.Retries = 1
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if err := c.Send(time.Now().UnixNano(), "throttled", nil); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	start := time.Now()
+	if err := c.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
+		t.Fatalf("Retry-After was not honored, flushed in %v", elapsed)
+	}
+	if s.requestCount() != 2 {
+		t.Fatalf("want 2 requests, got %d", s.requestCount())
+	}
+	sent, dropped := c.Stats()
+	if sent != 1 || dropped != 0 {
+		t.Fatalf("want sent=1 dropped=0, got sent=%d dropped=%d", sent, dropped)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestClientCapsRetryAfter(t *testing.T) {
+	s := newLokiServer(t, 204)
+	s.rateLimitLeft = 1
+	s.retryAfterValue = "3600"
+	cfg := testConfig(s.srv.URL)
+	cfg.Retries = 1
+	cfg.MaxRetryWait = 20 * time.Millisecond
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if err := c.Send(time.Now().UnixNano(), "throttled", nil); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if err := c.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if s.requestCount() != 2 {
+		t.Fatalf("want 2 requests, got %d", s.requestCount())
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestClientAdaptiveShrinkOnRateLimit(t *testing.T) {
+	s := newLokiServer(t, 204)
+	s.rateLimitLeft = 2 // first push fails even after its retry
+	s.retryAfterValue = "0"
+	cfg := testConfig(s.srv.URL)
+	cfg.BatchSize = 4
+	cfg.QueueDepth = 16
+	cfg.Retries = 1
+	s.gateBlocks()
+	defer s.release()
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	for i := 0; i < 8; i++ {
+		if err := c.Send(time.Now().UnixNano(), fmt.Sprintf("line-%d", i), nil); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+	}
+	s.waitEntered() // the push after the failed batch is pinned at the gate
+	s.release()
+	waitUntil(t, func() bool { return s.requestCount() >= 3 })
+	if s.requestCount() != 3 {
+		s.dumpRequests(t)
+		t.Fatalf("want 3 requests before close, got %d", s.requestCount())
+	}
+	if st := s.statusAt(0); st != http.StatusTooManyRequests {
+		t.Fatalf("want first request rate limited, got %d", st)
+	}
+	if st := s.statusAt(1); st != http.StatusTooManyRequests {
+		t.Fatalf("want retry rate limited, got %d", st)
+	}
+	if s.totalValuesAt(t, 2) != 2 {
+		s.dumpRequests(t)
+		t.Fatalf("want batch shrunk from 4 to 2, got %d values", s.totalValuesAt(t, 2))
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if s.requestCount() != 4 {
+		s.dumpRequests(t)
+		t.Fatalf("want 4 requests after close, got %d", s.requestCount())
+	}
+	sent, dropped := c.Stats()
+	if sent != 4 || dropped != 4 {
+		t.Fatalf("want sent=4 dropped=4, got sent=%d dropped=%d", sent, dropped)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	if d, ok := parseRetryAfter("30", now); !ok || d != 30*time.Second {
+		t.Fatalf("seconds form: got %v ok=%v", d, ok)
+	}
+	if d, ok := parseRetryAfter(now.Add(time.Minute).Format(http.TimeFormat), now); !ok || d != time.Minute {
+		t.Fatalf("http-date form: got %v ok=%v", d, ok)
+	}
+	if d, ok := parseRetryAfter(now.Add(-time.Minute).Format(http.TimeFormat), now); !ok || d != 0 {
+		t.Fatalf("past http-date: got %v ok=%v", d, ok)
+	}
+	if _, ok := parseRetryAfter("", now); ok {
+		t.Fatal("empty header must not parse")
+	}
+	if _, ok := parseRetryAfter("soon", now); ok {
+		t.Fatal("garbage must not parse")
 	}
 }
