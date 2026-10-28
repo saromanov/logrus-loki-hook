@@ -13,13 +13,14 @@ v2 is a complete rewrite: it talks to the modern Loki API (`/loki/api/v1/push`, 
 
 - **No lost logs** — background batching with `Flush()`/`Close()`: everything queued is delivered on shutdown, including `panic`/`fatal` entries
 - **Never blocks your app** — async buffered queue with configurable overflow policies: `DropNewest`, `DropOldest`, `Block` (with timeout)
+- **Flood protection** — `SampleRate` keeps every Nth low-severity entry while warn and above always pass, and `MaxLogsPerSecond` caps the delivery rate with a token bucket; both are visible in `Counters()`, so loss is never silent
 - **Retries with backoff** — transient failures (network errors, `429`, `421`, `5xx`) are retried with exponential backoff; a `Retry-After` header is honored instead of the fixed backoff; permanent `4xx` fail fast
 - **Adaptive batching** — batches rejected as too large are split in half until the offender is isolated; the effective batch size shrinks on repeated rate limiting and recovers after successes; oversized lines are truncated with a ` [truncated]` marker instead of failing the batch
 - **Grafana Cloud ready** — `X-Scope-OrgID` multi-tenancy header, basic auth, bearer token, custom headers, TLS config
 - **Dynamic labels** — promote any logrus field to a Loki stream label with `LabelKeys` (e.g. `request_id`, `pod`)
 - **OpenTelemetry correlation** — `InjectTrace` adds `trace_id`/`span_id` from the OTel context to every JSON log line
 - **slog support** — a full `slog.Handler` implementation sharing the same client with the logrus hook
-- **In-flight observability** — `Stats()` reports sent vs dropped entries, so silent log loss is visible
+- **In-flight observability** — `Stats()` reports sent vs dropped entries, `Counters()` adds entries skipped by sampling or rate limiting, so silent log loss is visible
 
 ## Installation
 
@@ -111,6 +112,8 @@ hook, err := hook.NewHook(hook.Config{
 | `MinLevel` | `debug` | Minimum logrus level forwarded |
 | `SlogMinLevel` | `INFO` | Minimum slog level handled |
 | `InjectTrace` | `false` | Add `trace_id`/`span_id` from OTel context |
+| `SampleRate` | off | 1-in-N sampling for Info/Debug entries; warn and above always pass |
+| `MaxLogsPerSecond` | off | Token-bucket cap on the delivery rate (burst = rate) |
 
 ## Migration from v1
 

@@ -629,3 +629,59 @@ func TestParseRetryAfter(t *testing.T) {
 		t.Fatal("garbage must not parse")
 	}
 }
+
+func TestClientRateLimitsWithTokenBucket(t *testing.T) {
+	s := newLokiServer(t, 204)
+	cfg := testConfig(s.srv.URL)
+	cfg.MaxLogsPerSecond = 2 // burst of 2, sends happen within microseconds
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	allowed := 0
+	for i := 0; i < 6; i++ {
+		if err := c.Send(time.Now().UnixNano(), fmt.Sprintf("line-%d", i), nil); err != nil {
+			if !errors.Is(err, ErrRateLimited) {
+				t.Fatalf("send: %v", err)
+			}
+			continue
+		}
+		allowed++
+	}
+	if allowed != 2 {
+		t.Fatalf("want 2 entries admitted by the limiter, got %d", allowed)
+	}
+	if err := c.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	cn := c.Counters()
+	if cn.Sent != 2 || cn.RateLimited != 4 || cn.Dropped != 0 {
+		t.Fatalf("want sent=2 rate_limited=4 dropped=0, got %+v", cn)
+	}
+}
+
+func TestClientTokenBucketRefillsOverTime(t *testing.T) {
+	s := newLokiServer(t, 204)
+	cfg := testConfig(s.srv.URL)
+	cfg.MaxLogsPerSecond = 10
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	for i := 0; i < 10; i++ { // drain the burst
+		if err := c.Send(time.Now().UnixNano(), "burst", nil); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+	}
+	if err := c.Send(time.Now().UnixNano(), "over", nil); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("want ErrRateLimited, got %v", err)
+	}
+	time.Sleep(150 * time.Millisecond) // ~1.5 tokens refill
+	if err := c.Send(time.Now().UnixNano(), "after-refill", nil); err != nil {
+		t.Fatalf("send after refill: %v", err)
+	}
+}

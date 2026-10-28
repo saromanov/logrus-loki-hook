@@ -53,6 +53,11 @@ func (h *Hook) Fire(entry *logrus.Entry) error {
 	if int(entry.Level) > int(h.cfg.MinLevel) {
 		return nil
 	}
+	// Low-severity entries are subject to 1-in-N sampling; warn and above
+	// always pass.
+	if entry.Level >= logrus.InfoLevel && !h.client.sampleKeep() {
+		return nil
+	}
 	line, err := h.cfg.Formatter.Format(entry)
 	if err != nil {
 		return fmt.Errorf("loki: format entry: %w", err)
@@ -85,6 +90,12 @@ func (h *Hook) Flush() error {
 // and dropped.
 func (h *Hook) Stats() (sent, dropped int64) {
 	return h.client.Stats()
+}
+
+// Counters reports the delivery counters of the hook's client, including
+// entries skipped by sampling or rate limiting.
+func (h *Hook) Counters() Counters {
+	return h.client.Counters()
 }
 
 // Close stops the hook. If the hook owns its client, the client is closed

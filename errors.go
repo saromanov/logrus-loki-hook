@@ -9,4 +9,8 @@ var (
 
 	// ErrClientClosed is returned by Send after the client has been closed.
 	ErrClientClosed = errors.New("loki: client is closed")
+
+	// ErrRateLimited is returned by Send when the entry was skipped by the
+	// MaxLogsPerSecond token bucket.
+	ErrRateLimited = errors.New("loki: rate limited by MaxLogsPerSecond")
 )

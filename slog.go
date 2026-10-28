@@ -41,6 +41,11 @@ func (h *SlogHandler) Enabled(_ context.Context, l slog.Level) bool {
 
 // Handle sends the record to the underlying client.
 func (h *SlogHandler) Handle(ctx context.Context, r slog.Record) error {
+	// Levels at or below INFO are subject to 1-in-N sampling; warn and
+	// above always pass.
+	if r.Level <= slog.LevelInfo && !h.client.sampleKeep() {
+		return nil
+	}
 	fields := make(map[string]any, r.NumAttrs()+len(h.attrs)+4)
 	fields["msg"] = r.Message
 	fields["level"] = r.Level.String()
@@ -93,6 +98,12 @@ func (h *SlogHandler) Flush() error {
 // Stats returns the number of successfully sent and dropped entries.
 func (h *SlogHandler) Stats() (sent, dropped int64) {
 	return h.client.Stats()
+}
+
+// Counters reports the delivery counters of the handler's client, including
+// entries skipped by sampling or rate limiting.
+func (h *SlogHandler) Counters() Counters {
+	return h.client.Counters()
 }
 
 func appendAttrs(fields map[string]any, prefix string, attrs []slog.Attr) {

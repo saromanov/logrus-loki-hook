@@ -50,17 +50,21 @@ type pushPayload struct {
 // Client batches log entries and pushes them to Loki over the native HTTP API.
 // It is safe for concurrent use.
 type Client struct {
-	cfg        Config
-	http       *http.Client
-	queue      chan logEntry
-	flushCh    chan chan struct{}
-	done       chan struct{}
-	wg         sync.WaitGroup
-	closed     atomic.Bool
-	sent       atomic.Int64
-	dropped    atomic.Int64
-	dropCounts [dropReasonCount]atomic.Int64
-	errLogger  *log.Logger
+	cfg         Config
+	http        *http.Client
+	queue       chan logEntry
+	flushCh     chan chan struct{}
+	done        chan struct{}
+	wg          sync.WaitGroup
+	closed      atomic.Bool
+	sent        atomic.Int64
+	dropped     atomic.Int64
+	dropCounts  [dropReasonCount]atomic.Int64
+	sampled     atomic.Int64
+	sampleSeq   atomic.Int64
+	rateLimited atomic.Int64
+	limiter     *tokenBucket
+	errLogger   *log.Logger
 
 	// adaptive is the current effective batch size. It shrinks on repeated
 	// rate-limit responses and recovers on success. Guarded by the batcher
@@ -85,6 +89,9 @@ func NewClient(cfg Config) (*Client, error) {
 		errLogger: log.New(os.Stderr, "logrus-loki-hook: ", log.LstdFlags),
 		adaptive:  cfg.BatchSize,
 	}
+	if cfg.MaxLogsPerSecond > 0 {
+		c.limiter = newTokenBucket(cfg.MaxLogsPerSecond)
+	}
 	c.wg.Add(1)
 	go c.run()
 	return c, nil
@@ -100,6 +107,10 @@ func (c *Client) Send(ts int64, line string, labels map[string]string) error {
 	}
 	if c.cfg.MaxLineSize >= 0 {
 		line = truncateLine(line, c.cfg.MaxLineSize)
+	}
+	if c.limiter != nil && !c.limiter.allow(time.Now()) {
+		c.rateLimited.Add(1)
+		return ErrRateLimited
 	}
 	entry := logEntry{ts: ts, line: line, labels: labels}
 	switch c.cfg.Overflow {
@@ -200,6 +211,32 @@ func (c *Client) Stats() (sent, dropped int64) {
 func (c *Client) drop(n int, r dropReason) {
 	c.dropped.Add(int64(n))
 	c.dropCounts[r].Add(int64(n))
+}
+
+// sampleKeep applies the 1-in-N SampleRate to a low-severity entry. Callers
+// must only consult it for entries at or below Info severity; warn and above
+// always pass and never consume a sample slot.
+func (c *Client) sampleKeep() bool {
+	if c.cfg.SampleRate <= 1 {
+		return true
+	}
+	n := c.sampleSeq.Add(1)
+	if n%int64(c.cfg.SampleRate) == 1 {
+		return true
+	}
+	c.sampled.Add(1)
+	return false
+}
+
+// Counters reports delivery counters, including entries skipped on purpose
+// by sampling or rate limiting. See Stats for the simpler sent/dropped view.
+func (c *Client) Counters() Counters {
+	return Counters{
+		Sent:        c.sent.Load(),
+		Dropped:     c.dropped.Load(),
+		Sampled:     c.sampled.Load(),
+		RateLimited: c.rateLimited.Load(),
+	}
 }
 
 func (c *Client) run() {
