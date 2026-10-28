@@ -3,6 +3,7 @@ package hook
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -233,4 +234,71 @@ type failingFormatter struct{}
 
 func (failingFormatter) Format(_ *logrus.Entry) ([]byte, error) {
 	return nil, context.Canceled
+}
+
+func TestHookSamplesLowSeverityEntries(t *testing.T) {
+	s := newLokiServer(t, 204)
+	h, err := NewHook(Config{URL: s.srv.URL, BatchWait: time.Hour, SampleRate: 3})
+	if err != nil {
+		t.Fatalf("new lokihook: %v", err)
+	}
+	for i := 0; i < 6; i++ {
+		if err := entryFor(t, h, logrus.InfoLevel, fmt.Sprintf("info-%d", i), nil); err != nil {
+			t.Fatalf("fire: %v", err)
+		}
+	}
+	if err := entryFor(t, h, logrus.WarnLevel, "warn-0", nil); err != nil {
+		t.Fatalf("fire warn: %v", err)
+	}
+	if err := entryFor(t, h, logrus.ErrorLevel, "error-0", nil); err != nil {
+		t.Fatalf("fire error: %v", err)
+	}
+	if err := h.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	payload := s.decodedPayload(t)
+	total := 0
+	for _, st := range payload.Streams {
+		total += len(st.Values)
+	}
+	if total != 4 { // info-0 and info-3 kept by sampling, plus warn and error
+		t.Fatalf("want 4 delivered entries, got %d", total)
+	}
+	cn := h.Counters()
+	if cn.Sent != 4 || cn.Sampled != 4 || cn.Dropped != 0 {
+		t.Fatalf("want sent=4 sampled=4 dropped=0, got %+v", cn)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestHookSampleRateOneKeepsEverything(t *testing.T) {
+	s := newLokiServer(t, 204)
+	h, err := NewHook(Config{URL: s.srv.URL, BatchWait: time.Hour, SampleRate: 1})
+	if err != nil {
+		t.Fatalf("new lokihook: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if err := entryFor(t, h, logrus.InfoLevel, fmt.Sprintf("info-%d", i), nil); err != nil {
+			t.Fatalf("fire: %v", err)
+		}
+	}
+	if err := h.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	payload := s.decodedPayload(t)
+	total := 0
+	for _, st := range payload.Streams {
+		total += len(st.Values)
+	}
+	if total != 5 {
+		t.Fatalf("want 5 delivered entries, got %d", total)
+	}
+	if cn := h.Counters(); cn.Sampled != 0 {
+		t.Fatalf("want sampled=0, got %+v", cn)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
 }

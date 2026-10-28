@@ -2,6 +2,7 @@ package hook
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -116,6 +117,33 @@ func TestSlogHandlerSharedClientWithLogrus(t *testing.T) {
 		t.Fatalf("want sent=2, got %d", sent)
 	}
 	if err := client.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestSlogHandlerSamplesLowSeverityRecords(t *testing.T) {
+	s := newLokiServer(t, 204)
+	logger, handler := newSlog(t, Config{URL: s.srv.URL, BatchWait: time.Hour, SampleRate: 2})
+	for i := 0; i < 4; i++ {
+		logger.Info(fmt.Sprintf("info-%d", i))
+	}
+	logger.Warn("warn-0") // warn and above are never sampled
+	if err := handler.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	payload := s.decodedPayload(t)
+	total := 0
+	for _, st := range payload.Streams {
+		total += len(st.Values)
+	}
+	if total != 3 { // info-0 and info-2 kept by sampling, plus the warn
+		t.Fatalf("want 3 delivered records, got %d", total)
+	}
+	cn := handler.Counters()
+	if cn.Sent != 3 || cn.Sampled != 2 {
+		t.Fatalf("want sent=3 sampled=2, got %+v", cn)
+	}
+	if err := handler.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 }

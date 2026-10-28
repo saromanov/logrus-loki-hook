@@ -114,6 +114,16 @@ type Config struct {
 	// InjectTrace adds trace_id and span_id fields from the OpenTelemetry
 	// context to JSON-formatted log lines.
 	InjectTrace bool
+
+	// SampleRate enables 1-in-N sampling for low-severity entries: logrus
+	// levels at or below Info and slog levels at or below INFO. Warn and
+	// above always pass. Zero or one disables sampling.
+	SampleRate int
+
+	// MaxLogsPerSecond caps the delivery rate with a token bucket whose
+	// burst equals the rate. Faster entries are skipped and counted as
+	// rate limited. Zero disables the limit.
+	MaxLogsPerSecond float64
 }
 
 const defaultURL = "http://localhost:3100/loki/api/v1/push"
