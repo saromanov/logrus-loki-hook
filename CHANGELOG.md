@@ -28,6 +28,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Loki on the next startup, torn tails from crashes are skipped and counted,
   failed pushes preserve the undelivered tail atomically; `BufferMaxSize`
   and `BufferMaxSegments` control rotation. (#12)
+- `FlushContext` on `Client`, `Hook` and `SlogHandler`: flush with a deadline
+  or cancellation while still guaranteeing delivery of everything queued. (#13)
 
 ### Fixed
 

@@ -1,6 +1,7 @@
 package hook
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/sirupsen/logrus"
@@ -84,6 +85,12 @@ func (h *Hook) Levels() []logrus.Level {
 // Flush pushes all queued entries immediately, bypassing the batch timer.
 func (h *Hook) Flush() error {
 	return h.client.Flush()
+}
+
+// FlushContext is Flush with a deadline or cancellation; see
+// Client.FlushContext.
+func (h *Hook) FlushContext(ctx context.Context) error {
+	return h.client.FlushContext(ctx)
 }
 
 // Stats returns the number of entries the hook's client has successfully sent
