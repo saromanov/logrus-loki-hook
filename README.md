@@ -13,7 +13,8 @@ v2 is a complete rewrite: it talks to the modern Loki API (`/loki/api/v1/push`, 
 
 - **No lost logs** — background batching with `Flush()`/`Close()`: everything queued is delivered on shutdown, including `panic`/`fatal` entries
 - **Never blocks your app** — async buffered queue with configurable overflow policies: `DropNewest`, `DropOldest`, `Block` (with timeout)
-- **Retries with backoff** — transient failures (network errors, `429`, `5xx`) are retried with exponential backoff; permanent `4xx` fail fast
+- **Retries with backoff** — transient failures (network errors, `429`, `421`, `5xx`) are retried with exponential backoff; a `Retry-After` header is honored instead of the fixed backoff; permanent `4xx` fail fast
+- **Adaptive batching** — batches rejected as too large are split in half until the offender is isolated; the effective batch size shrinks on repeated rate limiting and recovers after successes; oversized lines are truncated with a ` [truncated]` marker instead of failing the batch
 - **Grafana Cloud ready** — `X-Scope-OrgID` multi-tenancy header, basic auth, bearer token, custom headers, TLS config
 - **Dynamic labels** — promote any logrus field to a Loki stream label with `LabelKeys` (e.g. `request_id`, `pod`)
 - **OpenTelemetry correlation** — `InjectTrace` adds `trace_id`/`span_id` from the OTel context to every JSON log line
@@ -97,8 +98,10 @@ hook, err := hook.NewHook(hook.Config{
 | `QueueDepth` | `4096` | Internal queue capacity |
 | `Overflow` | `DropNewest` | `DropNewest`, `DropOldest` or `Block` |
 | `BlockTimeout` | `5s` | How long `Fire` blocks when `Overflow` is `Block` |
-| `Retries` | `3` | Retries on network errors, `429`, `5xx` |
+| `Retries` | `3` | Retries on network errors, `429`, `421`, `5xx` |
 | `RetryBackoff` | `500ms` | Base backoff, doubles per attempt |
+| `MaxRetryWait` | `30s` | Cap for sleeps derived from `Retry-After` headers |
+| `MaxLineSize` | `512KiB` | Truncate longer lines (UTF-8 safe) instead of failing the batch; negative disables |
 | `Timeout` | `10s` | HTTP request timeout |
 | `BasicAuth` | none | HTTP basic auth credentials |
 | `BearerToken` | none | `Authorization: Bearer` header |

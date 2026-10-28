@@ -20,6 +20,12 @@ type lokiServer struct {
 	mu        sync.Mutex
 	reqs      []capturedRequest
 	failsLeft int
+	// badLeft makes the next N requests respond 400.
+	badLeft int
+	// rateLimitLeft makes the next N requests respond 429 with a
+	// Retry-After header set to retryAfterValue.
+	rateLimitLeft   int
+	retryAfterValue string
 	// gate, when non-nil, makes the handler block until release() closes it.
 	// This pins the batcher goroutine in push, so overflow policies can be
 	// tested deterministically. Written only before any request is made.
@@ -31,6 +37,7 @@ type lokiServer struct {
 type capturedRequest struct {
 	body    []byte
 	headers http.Header
+	status  int
 }
 
 func newLokiServer(t *testing.T, statusCode int) *lokiServer {
@@ -47,10 +54,35 @@ func newLokiServer(t *testing.T, statusCode int) *lokiServer {
 		if fails > 0 {
 			s.failsLeft--
 		}
-		s.reqs = append(s.reqs, capturedRequest{body: body, headers: r.Header.Clone()})
+		bad := s.badLeft
+		if bad > 0 {
+			s.badLeft--
+		}
+		limited := s.rateLimitLeft
+		if limited > 0 {
+			s.rateLimitLeft--
+		}
+		status := statusCode
+		if fails > 0 {
+			status = http.StatusInternalServerError
+		} else if limited > 0 {
+			status = http.StatusTooManyRequests
+		} else if bad > 0 {
+			status = http.StatusBadRequest
+		}
+		s.reqs = append(s.reqs, capturedRequest{body: body, headers: r.Header.Clone(), status: status})
 		s.mu.Unlock()
 		if fails > 0 {
 			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if limited > 0 {
+			w.Header().Set("Retry-After", s.retryAfterValue)
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		if bad > 0 {
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		if s.gate != nil {
@@ -116,6 +148,45 @@ func (s *lokiServer) decodedPayload(t *testing.T) pushPayload {
 		t.Fatalf("unmarshal payload: %v; raw=%s", err, data)
 	}
 	return payload
+}
+
+// decodedPayloadAt decodes the request captured at index i.
+func (s *lokiServer) decodedPayloadAt(t *testing.T, i int) pushPayload {
+	t.Helper()
+	s.mu.Lock()
+	req := s.reqs[i]
+	s.mu.Unlock()
+	zr, err := gzip.NewReader(bytes.NewReader(req.body))
+	if err != nil {
+		t.Fatalf("open gzip: %v", err)
+	}
+	data, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("read gzip: %v", err)
+	}
+	var payload pushPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v; raw=%s", err, data)
+	}
+	return payload
+}
+
+// statusAt returns the response status of the request captured at index i.
+func (s *lokiServer) statusAt(i int) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reqs[i].status
+}
+
+// totalValuesAt sums the values of every stream in the request at index i.
+func (s *lokiServer) totalValuesAt(t *testing.T, i int) int {
+	t.Helper()
+	payload := s.decodedPayloadAt(t, i)
+	n := 0
+	for _, st := range payload.Streams {
+		n += len(st.Values)
+	}
+	return n
 }
 
 func testConfig(url string) Config {

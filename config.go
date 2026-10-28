@@ -66,12 +66,22 @@ type Config struct {
 	BlockTimeout time.Duration
 
 	// Retries is the number of retries for retryable responses
-	// (network errors, 429 and 5xx).
+	// (network errors, 429, 421 and 5xx).
 	Retries int
 
 	// RetryBackoff is the base backoff between retries; it doubles on
 	// every attempt.
 	RetryBackoff time.Duration
+
+	// MaxRetryWait caps the sleep derived from a Retry-After response
+	// header. Defaults to 30s.
+	MaxRetryWait time.Duration
+
+	// MaxLineSize truncates log lines longer than this many bytes (at a
+	// UTF-8 sequence boundary) and appends a " [truncated]" marker, so a
+	// single oversized line no longer fails the whole batch. Zero means the
+	// Loki default (512 KiB); a negative value disables truncation.
+	MaxLineSize int
 
 	// Timeout is the HTTP request timeout.
 	Timeout time.Duration
@@ -108,6 +118,9 @@ type Config struct {
 
 const defaultURL = "http://localhost:3100/loki/api/v1/push"
 
+// defaultMaxLineSize matches the default Loki `max_line_size` limit.
+const defaultMaxLineSize = 512 * 1024
+
 func (c *Config) setDefaults() {
 	if c.URL == "" {
 		c.URL = defaultURL
@@ -135,6 +148,12 @@ func (c *Config) setDefaults() {
 	}
 	if c.RetryBackoff == 0 {
 		c.RetryBackoff = 500 * time.Millisecond
+	}
+	if c.MaxRetryWait == 0 {
+		c.MaxRetryWait = 30 * time.Second
+	}
+	if c.MaxLineSize == 0 {
+		c.MaxLineSize = defaultMaxLineSize
 	}
 	if c.Timeout == 0 {
 		c.Timeout = 10 * time.Second
