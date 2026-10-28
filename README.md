@@ -20,7 +20,7 @@ v2 is a complete rewrite: it talks to the modern Loki API (`/loki/api/v1/push`, 
 - **Dynamic labels** — promote any logrus field to a Loki stream label with `LabelKeys` (e.g. `request_id`, `pod`)
 - **OpenTelemetry correlation** — `InjectTrace` adds `trace_id`/`span_id` from the OTel context to every JSON log line
 - **slog support** — a full `slog.Handler` implementation sharing the same client with the logrus hook
-- **In-flight observability** — `Stats()` reports sent vs dropped entries, `Counters()` adds entries skipped by sampling or rate limiting, so silent log loss is visible
+- **In-flight observability** — `Stats()` reports sent vs dropped entries, `Counters()` adds entries skipped by sampling or rate limiting, and an optional Prometheus `/metrics` endpoint exposes everything (including drop reasons and push duration), so silent log loss is visible
 
 ## Installation
 
@@ -114,6 +114,20 @@ hook, err := hook.NewHook(hook.Config{
 | `InjectTrace` | `false` | Add `trace_id`/`span_id` from OTel context |
 | `SampleRate` | off | 1-in-N sampling for Info/Debug entries; warn and above always pass |
 | `MaxLogsPerSecond` | off | Token-bucket cap on the delivery rate (burst = rate) |
+| `MetricsAddr` | off | Serve a Prometheus `/metrics` endpoint on this address |
+
+## Metrics
+
+Set `MetricsAddr` to serve a Prometheus text-exposition endpoint:
+
+```go
+hook, err := hook.NewHook(hook.Config{
+	URL:         "http://localhost:3100/loki/api/v1/push",
+	MetricsAddr: "127.0.0.1:9080",
+})
+```
+
+Exposed metrics: `loki_client_sent_total`, `loki_client_dropped_total{reason}` (`queue_full`, `encode_error`, `push_error`, `rate_limited`, `rejected`), `loki_client_sampled_total`, `loki_client_rate_limited_total`, `loki_client_queue_depth`, `loki_client_push_errors_total` and `loki_client_push_duration_seconds` (summary). Point Prometheus at `http://<addr>/metrics` to see exactly when and why logs were dropped.
 
 ## Migration from v1
 

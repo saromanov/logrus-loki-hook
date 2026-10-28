@@ -124,6 +124,13 @@ type Config struct {
 	// burst equals the rate. Faster entries are skipped and counted as
 	// rate limited. Zero disables the limit.
 	MaxLogsPerSecond float64
+
+	// MetricsAddr, when set (for example ":9080"), serves a Prometheus
+	// text-exposition endpoint at /metrics with the delivery counters:
+	// sent, dropped by reason, sampled, rate limited, queue depth, push
+	// errors and push duration. Use a dedicated address and keep one
+	// metrics endpoint per process.
+	MetricsAddr string
 }
 
 const defaultURL = "http://localhost:3100/loki/api/v1/push"

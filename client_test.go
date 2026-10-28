@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -683,5 +684,135 @@ func TestClientTokenBucketRefillsOverTime(t *testing.T) {
 	time.Sleep(150 * time.Millisecond) // ~1.5 tokens refill
 	if err := c.Send(time.Now().UnixNano(), "after-refill", nil); err != nil {
 		t.Fatalf("send after refill: %v", err)
+	}
+}
+
+func TestMetricsEndpointExposesCounters(t *testing.T) {
+	s := newLokiServer(t, 204)
+	// Reserve a port, release it and hand it to the client.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	cfg := testConfig(s.srv.URL)
+	cfg.MetricsAddr = addr
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	if got := c.MetricsAddr(); got != addr {
+		t.Fatalf("want metrics addr %q, got %q", addr, got)
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := c.Send(time.Now().UnixNano(), fmt.Sprintf("line-%d", i), nil); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+	}
+	if err := c.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	resp, err := http.Get("http://" + addr + metricsPath)
+	if err != nil {
+		t.Fatalf("get metrics: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"loki_client_sent_total 3",
+		`loki_client_dropped_total{reason="queue_full"} 0`,
+		"loki_client_queue_depth",
+		"loki_client_push_duration_seconds_sum",
+		"loki_client_push_duration_seconds_count 1",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("metrics output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestMetricsDisabledByDefault(t *testing.T) {
+	c, err := NewClient(testConfig("http://localhost:0/loki/api/v1/push"))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if c.MetricsAddr() != "" {
+		t.Fatalf("want empty metrics addr, got %q", c.MetricsAddr())
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestMetricsBindFailureSurfaces(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	cfg := testConfig("http://localhost:0/loki/api/v1/push")
+	cfg.MetricsAddr = ln.Addr().String() // port is taken
+	if _, err := NewClient(cfg); err == nil {
+		t.Fatal("want bind error")
+	}
+}
+
+func TestMetricsDropReasonsReflectRejections(t *testing.T) {
+	s := newLokiServer(t, 204)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	cfg := testConfig(s.srv.URL)
+	cfg.MetricsAddr = addr
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// One rejected single entry -> dropped_total{reason="rejected"}.
+	s.badLeft = 1
+	if err := c.Send(time.Now().UnixNano(), "bad", nil); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if err := c.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	waitUntil(t, func() bool {
+		cn := c.Counters()
+		return cn.Dropped == 1
+	})
+
+	resp, err := http.Get("http://" + addr + metricsPath)
+	if err != nil {
+		t.Fatalf("get metrics: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	text := string(body)
+	if !strings.Contains(text, `loki_client_dropped_total{reason="rejected"} 1`) {
+		t.Fatalf("metrics output missing rejected drop:\n%s", text)
+	}
+	if !strings.Contains(text, "loki_client_push_errors_total 1") {
+		t.Fatalf("metrics output missing push errors:\n%s", text)
 	}
 }
