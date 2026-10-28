@@ -38,6 +38,14 @@ const (
 	dropReasonCount
 )
 
+var dropReasonNames = [dropReasonCount]string{
+	"queue_full",
+	"encode_error",
+	"push_error",
+	"rate_limited",
+	"rejected",
+}
+
 type pushStream struct {
 	Stream map[string]string `json:"stream"`
 	Values [][]string        `json:"values"`
@@ -50,21 +58,26 @@ type pushPayload struct {
 // Client batches log entries and pushes them to Loki over the native HTTP API.
 // It is safe for concurrent use.
 type Client struct {
-	cfg         Config
-	http        *http.Client
-	queue       chan logEntry
-	flushCh     chan chan struct{}
-	done        chan struct{}
-	wg          sync.WaitGroup
-	closed      atomic.Bool
-	sent        atomic.Int64
-	dropped     atomic.Int64
-	dropCounts  [dropReasonCount]atomic.Int64
-	sampled     atomic.Int64
-	sampleSeq   atomic.Int64
-	rateLimited atomic.Int64
-	limiter     *tokenBucket
-	errLogger   *log.Logger
+	cfg          Config
+	http         *http.Client
+	queue        chan logEntry
+	flushCh      chan chan struct{}
+	done         chan struct{}
+	wg           sync.WaitGroup
+	closed       atomic.Bool
+	sent         atomic.Int64
+	dropped      atomic.Int64
+	dropCounts   [dropReasonCount]atomic.Int64
+	sampled      atomic.Int64
+	sampleSeq    atomic.Int64
+	rateLimited  atomic.Int64
+	limiter      *tokenBucket
+	pushErrors   atomic.Int64
+	pushDuration atomic.Int64
+	pushCount    atomic.Int64
+	metricsSrv   *http.Server
+	metricsAddr  string
+	errLogger    *log.Logger
 
 	// adaptive is the current effective batch size. It shrinks on repeated
 	// rate-limit responses and recovers on success. Guarded by the batcher
@@ -91,6 +104,14 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 	if cfg.MaxLogsPerSecond > 0 {
 		c.limiter = newTokenBucket(cfg.MaxLogsPerSecond)
+	}
+	if cfg.MetricsAddr != "" {
+		srv, addr, err := startMetricsServer(cfg.MetricsAddr, c)
+		if err != nil {
+			return nil, err
+		}
+		c.metricsSrv = srv
+		c.metricsAddr = addr
 	}
 	c.wg.Add(1)
 	go c.run()
@@ -199,7 +220,16 @@ func (c *Client) Close() error {
 	}
 	close(c.done)
 	c.wg.Wait()
+	if c.metricsSrv != nil {
+		_ = c.metricsSrv.Close()
+	}
 	return nil
+}
+
+// MetricsAddr returns the address the Prometheus endpoint is listening on,
+// or an empty string when MetricsAddr was not configured.
+func (c *Client) MetricsAddr() string {
+	return c.metricsAddr
 }
 
 // Stats returns the number of successfully sent and dropped entries.
@@ -324,7 +354,11 @@ func (c *Client) pushBatch(entries []logEntry) error {
 		c.errLogger.Printf("failed to encode %d entries: %v", len(entries), err)
 		return err
 	}
+	start := time.Now()
 	if err := c.send(payload); err != nil {
+		c.pushCount.Add(1)
+		c.pushDuration.Add(int64(time.Since(start)))
+		c.pushErrors.Add(1)
 		var se *httpStatusError
 		if errors.As(err, &se) && se.code == http.StatusBadRequest && len(entries) > 1 {
 			mid := len(entries) / 2
@@ -347,6 +381,8 @@ func (c *Client) pushBatch(entries []logEntry) error {
 		c.errLogger.Printf("failed to push %d entries to Loki: %v", len(entries), err)
 		return err
 	}
+	c.pushCount.Add(1)
+	c.pushDuration.Add(int64(time.Since(start)))
 	c.sent.Add(int64(len(entries)))
 	return nil
 }
