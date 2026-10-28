@@ -3,6 +3,7 @@ package hook
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -242,11 +243,26 @@ func truncateLine(s string, limit int) string {
 // It blocks until the background batcher has delivered everything queued at
 // the moment of the call.
 func (c *Client) Flush() error {
+	return c.FlushContext(context.Background())
+}
+
+// FlushContext is Flush with a deadline or cancellation: it stops waiting
+// and returns the context error as soon as ctx is done. The flush itself is
+// not aborted — everything queued still gets delivered by the batcher.
+func (c *Client) FlushContext(ctx context.Context) error {
 	ch := make(chan struct{})
 	select {
 	case c.flushCh <- ch:
-		<-ch
-		return nil
+		select {
+		case <-ch:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.done:
+			return ErrClientClosed
+		}
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-c.done:
 		return ErrClientClosed
 	}

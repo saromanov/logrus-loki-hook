@@ -3,6 +3,7 @@ package hook
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -815,4 +816,55 @@ func TestMetricsDropReasonsReflectRejections(t *testing.T) {
 	if !strings.Contains(text, "loki_client_push_errors_total 1") {
 		t.Fatalf("metrics output missing push errors:\n%s", text)
 	}
+}
+
+func TestFlushContextReturnsWhenDelivered(t *testing.T) {
+	s := newLokiServer(t, 204)
+	c, err := NewClient(testConfig(s.srv.URL))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := c.Send(time.Now().UnixNano(), "ctx-flush", nil); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := c.FlushContext(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	sent, _ := c.Stats()
+	if sent != 1 {
+		t.Fatalf("want sent=1, got %d", sent)
+	}
+}
+
+func TestFlushContextHonorsCancellation(t *testing.T) {
+	s := newLokiServer(t, 204)
+	s.gateBlocks()
+	defer s.release()
+	c, err := NewClient(gatedConfig(s.srv.URL))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := c.Send(time.Now().UnixNano(), "pinned", nil); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	s.waitEntered() // batcher is pinned inside push
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := c.FlushContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want DeadlineExceeded, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("flush did not honor the deadline: %v", elapsed)
+	}
+	// The flush is not aborted: after release the entry is still delivered.
+	s.release()
+	waitUntil(t, func() bool {
+		sent, _ := c.Stats()
+		return sent == 1
+	})
 }

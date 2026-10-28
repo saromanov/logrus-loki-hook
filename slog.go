@@ -95,6 +95,12 @@ func (h *SlogHandler) Flush() error {
 	return h.client.Flush()
 }
 
+// FlushContext is Flush with a deadline or cancellation; see
+// Client.FlushContext.
+func (h *SlogHandler) FlushContext(ctx context.Context) error {
+	return h.client.FlushContext(ctx)
+}
+
 // Stats returns the number of successfully sent and dropped entries.
 func (h *SlogHandler) Stats() (sent, dropped int64) {
 	return h.client.Stats()
