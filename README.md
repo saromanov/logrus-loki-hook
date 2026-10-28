@@ -147,7 +147,22 @@ v2 also fixes a v1 bug that logged only the level string instead of the message.
 
 ## Examples
 
-See [examples/](examples/) for runnable logrus and slog programs.
+See [examples/](examples/) for runnable logrus and slog programs, and
+`example_test.go` for godoc examples.
+
+## Benchmarks
+
+```bash
+go test -bench . -benchmem
+```
+
+`BenchmarkHookFire` measures the synchronous cost of a logrus `Fire` call
+(JSON formatting plus enqueueing); `BenchmarkEncode` measures rendering of a
+100-entry push payload.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

@@ -221,15 +221,15 @@ func (c *Client) spill(e logEntry) bool {
 // truncateMarker is appended to lines shortened by MaxLineSize.
 const truncateMarker = " [truncated]"
 
-// truncateLine shortens s to at most max bytes without splitting a UTF-8
+// truncateLine shortens s to at most limit bytes without splitting a UTF-8
 // sequence, appending a marker so the loss stays visible in Loki.
-func truncateLine(s string, max int) string {
-	if max <= 0 || len(s) <= max {
+func truncateLine(s string, limit int) string {
+	if limit <= 0 || len(s) <= limit {
 		return s
 	}
-	keep := max - len(truncateMarker)
+	keep := limit - len(truncateMarker)
 	if keep <= 0 {
-		return truncateMarker[:max]
+		return truncateMarker[:limit]
 	}
 	cut := keep
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
@@ -611,9 +611,9 @@ func (c *Client) send(payload []byte) error {
 }
 
 func truncate(data []byte) string {
-	const max = 256
-	if len(data) <= max {
+	const limit = 256
+	if len(data) <= limit {
 		return string(data)
 	}
-	return string(data[:max]) + "..."
+	return string(data[:limit]) + "..."
 }

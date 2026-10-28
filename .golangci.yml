@@ -7,6 +7,9 @@ linters:
     - unconvert
     - unparam
     - copyloopvar
+    - errorlint
+    - predeclared
+    - usestdlibvars
 
 formatters:
   enable:
