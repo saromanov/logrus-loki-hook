@@ -15,4 +15,8 @@ type Counters struct {
 
 	// RateLimited is the number of entries skipped by MaxLogsPerSecond.
 	RateLimited int64
+
+	// Spilled is the number of entries written to the durable disk buffer
+	// instead of being dropped.
+	Spilled int64
 }

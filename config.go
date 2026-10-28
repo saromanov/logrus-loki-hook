@@ -131,6 +131,23 @@ type Config struct {
 	// errors and push duration. Use a dedicated address and keep one
 	// metrics endpoint per process.
 	MetricsAddr string
+
+	// BufferPath enables the durable disk buffer. Entries that do not fit
+	// into the queue (after the overflow policy) are appended as JSON lines
+	// to this file instead of being dropped, and on startup the buffer is
+	// drained into Loki before new entries are accepted. Parent
+	// directories are created as needed.
+	BufferPath string
+
+	// BufferMaxSize caps the size of one buffer segment in bytes. When the
+	// active segment grows beyond it, the file is rotated atomically and
+	// older segments are kept up to BufferMaxSegments. Defaults to 64 MiB.
+	BufferMaxSize int64
+
+	// BufferMaxSegments is the number of rotated segments kept next to the
+	// active one; the oldest is deleted when the limit is exceeded.
+	// Defaults to 4.
+	BufferMaxSegments int
 }
 
 const defaultURL = "http://localhost:3100/loki/api/v1/push"
@@ -171,6 +188,12 @@ func (c *Config) setDefaults() {
 	}
 	if c.MaxLineSize == 0 {
 		c.MaxLineSize = defaultMaxLineSize
+	}
+	if c.BufferMaxSize == 0 {
+		c.BufferMaxSize = 64 << 20
+	}
+	if c.BufferMaxSegments == 0 {
+		c.BufferMaxSegments = 4
 	}
 	if c.Timeout == 0 {
 		c.Timeout = 10 * time.Second
